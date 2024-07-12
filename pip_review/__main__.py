@@ -1,18 +1,17 @@
 from __future__ import absolute_import
-
-import argparse
-import json
-import logging
 import re
-import subprocess
-import sys
+import argparse
 from functools import partial
-from operator import itemgetter
-
+import logging
+import json
+import sys
+import os
 import pip
+import subprocess
 from packaging import version
 
-if sys.version_info.major == 3:  # Python3 Imports
+PY3 = sys.version_info.major == 3
+if PY3:  # Python3 Imports
     def check_output(*args, **kwargs):
         process = subprocess.Popen(stdout=subprocess.PIPE, *args, **kwargs)
         output, _ = process.communicate()
@@ -22,9 +21,9 @@ if sys.version_info.major == 3:  # Python3 Imports
             error.output = output
             raise error
         return output
+
 else:  # Python2 Imports
     from subprocess import check_output
-
     import __builtin__
     input = getattr(__builtin__, 'raw_input')
 
@@ -50,43 +49,25 @@ Python>=3.3.
 '''
 
 # parameters that pip list supports but not pip install
-LIST_ONLY = {
-    'l', 'local', 'path', 'format', 'not-required',
-    'exclude-editable', 'include-editable',
-}
+LIST_ONLY = set('l local path format not-required exclude-editable include-editable'.split())
 
 # parameters that pip install supports but not pip list
-INSTALL_ONLY = {
-    'c', 'constraint', 'no-deps', 't', 'target', 'platform', 'python-version',
-    'implementation', 'abi', 'root', 'prefix', 'b', 'build', 'src', 'U',
-    'upgrade', 'upgrade-strategy', 'force-reinstall', 'I', 'ignore-installed',
-    'ignore-requires-python', 'no-build-isolation', 'use-pep517',
-    'install-option', 'global-option', 'compile', 'no-compile', 
-    'no-warn-script-location', 'no-warn-conflicts', 'no-binary', 
-    'only-binary', 'prefer-binary', 'no-clean', 'require-hashes',
-    'progress-bar',
-}
+INSTALL_ONLY = set('c constraint no-deps t target platform python-version implementation abi root prefix b build src U upgrade upgrade-strategy force-reinstall I ignore-installed ignore-requires-python no-build-isolation use-pep517 install-option global-option compile no-compile no-warn-script-location no-warn-conflicts no-binary only-binary prefer-binary no-clean require-hashes progress-bar'.split())
 
-# command that sets up the pip module of the current Python interpreter
-PIP_CMD = [sys.executable, '-m', 'pip']
 
-# nicer headings for the columns in the oudated package table
-COLUMNS = {
-    'Package': 'name',
-    'Version': 'version',
-    'Latest': 'latest_version',
-    'Type': 'latest_filetype',
-}
-
-# version-specific information to be add to the help page
-VERSION_EPILOG = DEPRECATED_NOTICE if (2, 7) > sys.version_info >= (3, 3) else ''
+def version_epilog():
+    """Version-specific information to be add to the help page."""
+    if sys.version_info < (2, 7) or (3, 0) <= sys.version_info < (3, 3):
+        return DEPRECATED_NOTICE
+    else:
+        return ''
 
 
 def parse_args():
     description = 'Keeps your Python packages fresh. Looking for a new maintainer! See https://github.com/jgonggrijp/pip-review/issues/76'
     parser = argparse.ArgumentParser(
         description=description,
-        epilog=EPILOG + VERSION_EPILOG,
+        epilog=EPILOG+version_epilog(),
     )
     parser.add_argument(
         '--verbose', '-v', action='store_true', default=False,
@@ -106,12 +87,6 @@ def parse_args():
     parser.add_argument(
         '--freeze-outdated-packages', action='store_true', default=False,
         help='Freeze all outdated packages to "requirements.txt" before upgrading them')
-    parser.add_argument(
-        '--preview', '-p', action='store_true', default=False,
-        help='Preview update target list before execution')
-    parser.add_argument(
-        '--preview-only', '-P', action='store_true', default=False,
-        help='Preview only')
     return parser.parse_known_args()
 
 
@@ -134,6 +109,10 @@ def filter_forwards(args, exclude):
     return result
 
 
+def pip_cmd():
+    return [sys.executable, '-m', 'pip']
+
+
 class StdOutFilter(logging.Filter):
     def filter(self, record):
         return record.levelno in [logging.DEBUG, logging.INFO]
@@ -145,17 +124,17 @@ def setup_logging(verbose):
     else:
         level = logging.INFO
 
-    format_ = u'%(message)s'
+    format = u'%(message)s'
 
     logger = logging.getLogger(u'pip-review')
 
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.addFilter(StdOutFilter())
-    stdout_handler.setFormatter(logging.Formatter(format_))
+    stdout_handler.setFormatter(logging.Formatter(format))
     stdout_handler.setLevel(logging.DEBUG)
 
     stderr_handler = logging.StreamHandler(sys.stderr)
-    stderr_handler.setFormatter(logging.Formatter(format_))
+    stderr_handler.setFormatter(logging.Formatter(format))
     stderr_handler.setLevel(logging.WARNING)
 
     logger.setLevel(level)
@@ -167,7 +146,7 @@ def setup_logging(verbose):
 class InteractiveAsker(object):
     def __init__(self):
         self.cached_answer = None
-        self.last_answer = None
+        self.last_answer= None
 
     def ask(self, prompt):
         if self.cached_answer is not None:
@@ -192,7 +171,7 @@ ask_to_install = partial(InteractiveAsker().ask, prompt='Upgrade now?')
 
 
 def update_packages(packages, forwarded, continue_on_fail, freeze_outdated_packages):
-    upgrade_cmd = PIP_CMD + ['install', '-U'] + forwarded
+    upgrade_cmd = pip_cmd() + ['install', '-U'] + forwarded
 
     if freeze_outdated_packages:
         with open('requirements.txt', 'w') as f:
@@ -235,7 +214,7 @@ def parse_legacy(pip_output):
 
 
 def get_outdated_packages(forwarded):
-    command = PIP_CMD + ['list', '--outdated'] + forwarded
+    command = pip_cmd() + ['list', '--outdated'] + forwarded
     pip_version = version.parse(pip.__version__)
     if pip_version >= version.parse('6.0'):
         command.append('--disable-pip-version-check')
@@ -249,35 +228,11 @@ def get_outdated_packages(forwarded):
         packages = parse_legacy(output)
         return packages
 
-# Next two functions describe how to collect data for the
-# table. Note how they are not concerned with columns widths.
-
-def extract_column(data, field, title):
-    return [title] + list(map(itemgetter(field), data))
-
-def extract_table(outdated):
-    return [
-        extract_column(outdated, field, title)
-        for title, field in COLUMNS.items()
-    ]
-
-# Next two functions describe how to format any table. Note that
-# they make no assumptions about where the data come from.
-
-def column_width(column):
-    return max(map(len, filter(None, column)))
-
-def format_table(columns):
-    widths = list(map(column_width, columns))
-    row_fmt = ' '.join(map('{{:<{}}}'.format, widths)).format
-    ruler = '-' * (sum(widths) + len(widths) - 1)
-    rows = list(map(row_fmt, *columns))
-    head = rows[0]
-    body = rows[1:]
-    return '\n'.join([head, ruler] + body + [ruler])
-
 
 def main():
+    null = open(os.devnull, 'w')
+    subprocess.call(pip_cmd() + ["--version"], stdout=null, stderr=null)
+    
     args, forwarded = parse_args()
     list_args = filter_forwards(forwarded, INSTALL_ONLY)
     install_args = filter_forwards(forwarded, LIST_ONLY)
@@ -289,30 +244,23 @@ def main():
     outdated = get_outdated_packages(list_args)
     if not outdated and not args.raw:
         logger.info('Everything up-to-date')
-        return
-    if args.preview or args.preview_only:
-        logger.info(format_table(extract_table(outdated)))
-        if args.preview_only:
-            return
-    if args.auto:
+    elif args.auto:
         update_packages(outdated, install_args, args.continue_on_fail, args.freeze_outdated_packages)
-        return
-    if args.raw:
+    elif args.raw:
         for pkg in outdated:
             logger.info('{0}=={1}'.format(pkg['name'], pkg['latest_version']))
-        return
-
-    selected = []
-    for pkg in outdated:
-        logger.info('{0}=={1} is available (you have {2})'.format(
-            pkg['name'], pkg['latest_version'], pkg['version']
-        ))
-        if args.interactive:
-            answer = ask_to_install()
-            if answer in ['y', 'a']:
-                selected.append(pkg)
-    if selected:
-        update_packages(selected, install_args, args.continue_on_fail, args.freeze_outdated_packages)
+    else:
+        selected = []
+        for pkg in outdated:
+            logger.info('{0}=={1} is available (you have {2})'.format(
+                pkg['name'], pkg['latest_version'], pkg['version']
+            ))
+            if args.interactive:
+                answer = ask_to_install()
+                if answer in ['y', 'a']:
+                    selected.append(pkg)
+        if selected:
+            update_packages(selected, install_args, args.continue_on_fail, args.freeze_outdated_packages)
 
 
 if __name__ == '__main__':
